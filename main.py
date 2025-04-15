@@ -1,128 +1,83 @@
 import os
+import tempfile
+from typing import List, Tuple, Optional
+from pdf2image import convert_from_path
+from PIL import Image
+import pytesseract
 import PyPDF2
-from typing import List, Tuple
 
-class PDFSplitter:
-    def __init__(self, input_pdf_path: str):
-        """
-        Инициализация PDFSplitter с путем к входному PDF-файлу
-        
-        :param input_pdf_path: Путь к исходному PDF-файлу
-        """
-        self.input_pdf_path = input_pdf_path
-        self.text_pages = []
-        self.scanned_pages = []
-        
-    def analyze_pdf(self) -> Tuple[List[int], List[int]]:
-        """
-        Анализирует PDF-файл и определяет, какие страницы содержат текст, а какие являются сканированными
-        
-        :return: Кортеж (номера текстовых страниц, номера сканированных страниц)
-        """
-        try:
-            with open(self.input_pdf_path, 'rb') as file:
-                pdf_reader = PyPDF2.PdfReader(file)
-                
-                for page_num in range(len(pdf_reader.pages)):
-                    page = pdf_reader.pages[page_num]
-                    text = page.extract_text()
-                    
-                    # Если текст извлекается и его достаточно много - считаем текстовой страницей
-                    if text and len(text.strip()) > 100:
-                        self.text_pages.append(page_num + 1)  # +1 т.к. нумерация с 1
-                    else:
-                        # Проверяем, есть ли изображения на странице
-                        if '/XObject' in page.get('/Resources', {}):
-                            x_object = page['/Resources']['/XObject'].get_object()
-                            for obj in x_object:
-                                if x_object[obj]['/Subtype'] == '/Image':
-                                    self.scanned_pages.append(page_num + 1)
-                                    break
-        except Exception as e:
-            print(f"Ошибка при анализе PDF: {e}")
-        
+
+class PDFProcessor:
+    def __init__(self):
+        self.text_pages: List[int] = []
+        self.scanned_pages: List[int] = []
+
+    def analyze_pdf(self, pdf_path: str) -> Tuple[List[int], List[int]]:
+        """Определяет текстовые и сканированные страницы PDF"""
+        self.text_pages.clear()
+        self.scanned_pages.clear()
+
+        with open(pdf_path, 'rb') as file:
+            pdf = PyPDF2.PdfReader(file)
+
+            for i, page in enumerate(pdf.pages):
+                text = page.extract_text()
+                if text and len(text.strip()) > 100:
+                    self.text_pages.append(i + 1)
+                else:
+                    self.scanned_pages.append(i + 1)
+
         return self.text_pages, self.scanned_pages
-    
-    def split_pdf(self, text_output_path: str, scanned_output_path: str) -> None:
-        """
-        Разделяет PDF на два файла: с текстовыми страницами и со сканированными страницами
-        
-        :param text_output_path: Путь для сохранения PDF с текстовыми страницами
-        :param scanned_output_path: Путь для сохранения PDF со сканированными страницами
-        """
+
+    def extract_page_as_image(self, pdf_path: str, page_num: int) -> Optional[Image.Image]:
+        """Конвертирует страницу PDF в изображение"""
         try:
-            # Сначала анализируем файл, если еще не сделали этого
-            if not self.text_pages and not self.scanned_pages:
-                self.analyze_pdf()
-            
-            # Создаем писателей для выходных файлов
-            text_writer = PyPDF2.PdfWriter()
-            scanned_writer = PyPDF2.PdfWriter()
-            
-            with open(self.input_pdf_path, 'rb') as file:
-                pdf_reader = PyPDF2.PdfReader(file)
-                
-                for page_num in range(len(pdf_reader.pages)):
-                    if (page_num + 1) in self.text_pages:
-                        text_writer.add_page(pdf_reader.pages[page_num])
-                    elif (page_num + 1) in self.scanned_pages:
-                        scanned_writer.add_page(pdf_reader.pages[page_num])
-            
-            # Сохраняем результаты
-            if text_writer.pages:
-                with open(text_output_path, 'wb') as f:
-                    text_writer.write(f)
-            
-            if scanned_writer.pages:
-                with open(scanned_output_path, 'wb') as f:
-                    scanned_writer.write(f)
-                    
+            images = convert_from_path(pdf_path, first_page=page_num, last_page=page_num)
+            return images[0] if images else None
         except Exception as e:
-            print(f"Ошибка при разделении PDF: {e}")
-    
-    def get_text_pages(self) -> List[int]:
-        """Возвращает номера текстовых страниц"""
-        return self.text_pages
-    
-    def get_scanned_pages(self) -> List[int]:
-        """Возвращает номера сканированных страниц"""
-        return self.scanned_pages
+            print(f"Ошибка конвертации страницы {page_num} в изображение: {e}")
+            return None
+
+    def process_image_with_ocr(self, image: Image.Image) -> str:
+        """Распознаёт текст с изображения"""
+        return pytesseract.image_to_string(image, lang="rus+eng")
+
+    def process_pdf(self, input_pdf: str, text_output: str, ocr_output: str) -> None:
+        text_pages, scanned_pages = self.analyze_pdf(input_pdf)
+        print(f"Найдено {len(text_pages)} текстовых и {len(scanned_pages)} сканированных страниц")
+
+        text_writer = PyPDF2.PdfWriter()
+        with open(input_pdf, 'rb') as file:
+            pdf = PyPDF2.PdfReader(file)
+            for page_num in text_pages:
+                text_writer.add_page(pdf.pages[page_num - 1])
+
+        with open(text_output, 'wb') as f:
+            text_writer.write(f)
+
+        ocr_texts = []
+        for page_num in scanned_pages:
+            print(f"OCR страница {page_num}...")
+            image = self.extract_page_as_image(input_pdf, page_num)
+            if image:
+                text = self.process_image_with_ocr(image)
+                ocr_texts.append((page_num, text))
+
+        with open(ocr_output, 'w', encoding='utf-8') as f:
+            for page_num, text in ocr_texts:
+                f.write(f"## Страница {page_num}\n\n{text}\n\n")
+
+        print(f"Текстовые страницы сохранены в: {text_output}")
+        print(f"OCR результаты сохранены в: {ocr_output}")
 
 
 def main():
-    # Пример использования
     input_pdf = "temporary/1.pdf"
-    text_output = "text_pages.pdf"  # Исправлено имя файла
-    scanned_output = "scanned_pages.pdf"
-    
-    if not os.path.exists(input_pdf):
-        print(f"Файл {input_pdf} не найден!")
-        return
-    
-    splitter = PDFSplitter(input_pdf)
-    
-    # Анализируем PDF
-    text_pages, scanned_pages = splitter.analyze_pdf()
-    print(f"Текстовые страницы: {text_pages}")
-    print(f"Сканированные страницы: {scanned_pages}")
-    
-    if not text_pages and not scanned_pages:
-        print("Не удалось определить типы страниц. Возможно, файл поврежден или имеет нестандартный формат.")
-        return
-    
-    # Разделяем PDF
-    splitter.split_pdf(text_output, scanned_output)
-    
-    # Проверяем результаты
-    if os.path.exists(text_output):
-        print(f"Текстовые страницы сохранены в {text_output}")
-    else:
-        print("Не удалось сохранить текстовые страницы")
-    
-    if os.path.exists(scanned_output):
-        print(f"Сканированные страницы сохранены в {scanned_output}")
-    else:
-        print("Не удалось сохранить сканированные страницы")
+    text_output = "text_pages.pdf"
+    ocr_output = "ocr_results.md"
+
+    processor = PDFProcessor()
+    processor.process_pdf(input_pdf, text_output, ocr_output)
 
 
 if __name__ == "__main__":
